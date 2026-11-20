@@ -1,6 +1,7 @@
 # aki模式 定稿脚本：Real-CUGAN SE 4x（8 向 TTA）→ Lab 校色 → σ0.65 平滑 + 眼睛高光保护 → PNG / JPG q100 4:4:4 / ≤499,000 字节 JPG
 # 用法：python3 aki_mode.py 原图 x y w h n0|n-1 输出前缀 [眼框1 眼框2]
-#   x y w h 为原图上的正方形裁框；眼框为放大 4 倍、裁回后的输出图坐标 x0,y0,x1,y1
+#   x y w h 为原图上的正方形裁框；眼框为放大 4 倍、裁回后的输出图坐标 x0,y0,x1,y1（按原裁框尺寸）
+#   裁框边长超过 AKI_MAX_CROP（默认 1000）时，先把原图缩小到裁框边长 = 1000 再处理，成品约 4000×4000
 # 权重默认与本脚本同目录（up4x-latest-no-denoise.pth / up4x-latest-conservative.pth）
 import sys, os, io, glob, json, numpy as np, cv2, torch
 from PIL import Image
@@ -13,6 +14,16 @@ eyes = [tuple(map(int, s.split(","))) for s in sys.argv[8:]]
 _nm = {"n0": "no-denoise", "n-1": "conservative"}[mdl]
 MP = (glob.glob(os.path.join(HERE, "up4x-latest-" + _nm + ".pth")) + glob.glob("/home/claude/natsuaki1995/pth/up4x-latest-" + _nm + ".pth") + glob.glob("/mnt/user-data/uploads/*up4x-latest-" + _nm + ".pth") + glob.glob("/mnt/data/*up4x-latest-" + _nm + ".pth"))[0]
 O = Image.open(src); icc = O.info.get("icc_profile"); O = O.convert("RGB"); W0, H0 = O.size
+# 裁框过大时先整体缩小原图，使裁框边长 = AKI_MAX_CROP（默认 1000），成品约 4000 像素；坐标与眼框同比例换算
+LIMIT = int(os.environ.get("AKI_MAX_CROP", "1000")); scale = 1.0
+if max(w, h) > LIMIT:
+    scale = LIMIT / max(w, h); sq = (w == h)
+    O = Image.fromarray(cv2.resize(np.asarray(O), (round(W0 * scale), round(H0 * scale)), interpolation=cv2.INTER_AREA))
+    W0, H0 = O.size
+    x, y, w, h = round(x * scale), round(y * scale), round(w * scale), round(h * scale)
+    if sq: h = w
+    x, y = min(max(x, 0), W0 - w), min(max(y, 0), H0 - h)
+    eyes = [tuple(round(v * scale) for v in e) for e in eyes]
 pl, pt = min(16, x), min(16, y); pr, pb = min(16, W0 - x - w), min(16, H0 - y - h)
 inp = np.asarray(O.crop((x - pl, y - pt, x + w + pr, y + h + pb))).astype(np.float32) / 255
 torch.set_num_threads(2); m, _ = load(MP)
@@ -76,7 +87,7 @@ d = np.asarray(im.resize((w, h), Image.BOX)).astype(float)
 sat = lambda a: cv2.cvtColor(a.astype(np.uint8), cv2.COLOR_RGB2HSV)[..., 1].astype(float).mean()
 Bc = np.rint(B[pt*4:pt*4+h*4, pl*4:pl*4+w*4] * 255); Rc = np.asarray(im).astype(float)
 Yf = lambda a: 0.2126*a[...,0] + 0.7152*a[...,1] + 0.0722*a[...,2]
-print(json.dumps({"model": mdl, "box": [x, y, w, h], "pad": [pl, pt, pr, pb], "eye_hits": log,
+print(json.dumps({"model": mdl, "scale": round(scale, 4), "box": [x, y, w, h], "pad": [pl, pt, pr, pb], "eye_hits": log,
     "rgb_bias": np.round((d - ref).mean((0, 1)), 2).tolist(), "mae": round(float(np.abs(d - ref).mean()), 2),
     "sat_delta": round(sat(d) - sat(ref), 2),
     "dark_pp_vs_bicubic": round(float(((Yf(Rc) < 64).mean() - (Yf(Bc) < 64).mean()) * 100), 2),
