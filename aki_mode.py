@@ -1,4 +1,4 @@
-# aki模式 定稿脚本：Real-CUGAN SE 4x（8 向 TTA）→ Lab 校色 → σ0.65 平滑 + 眼睛高光保护 → PNG / JPG q100 4:4:4 / ≤499,000 字节 JPG
+# aki模式 定稿脚本：Real-CUGAN SE 4x（8 向 TTA）→ Lab 校色 → σ0.65 平滑 + 眼睛高光保护 → PNG / JPG q100 4:4:4 / ≤499,000 字节高质量 JPG（必要时缩小尺寸）
 # 用法：python3 aki_mode.py 原图 x y w h n0|n-1 输出前缀 [眼框1 眼框2]
 #   x y w h 为原图上的正方形裁框；眼框为放大 4 倍、裁回后的输出图坐标 x0,y0,x1,y1（按原裁框尺寸）
 #   裁框边长超过 AKI_MAX_CROP（默认 1000）时，先把原图缩小到裁框边长 = 1000 再处理，成品约 4000×4000
@@ -75,12 +75,23 @@ S = g(C, 0.65); R = Hm[..., None] * C + (1 - Hm[..., None]) * S
 R = R[pt*4:pt*4 + h*4, pl*4:pl*4 + w*4]
 im = Image.fromarray(np.rint(R * 255).astype(np.uint8)); kw = {"icc_profile": icc} if icc else {}
 im.save(out + ".png", **kw); im.save(out + ".jpg", quality=100, subsampling=0, optimize=True, **kw)
-done = None
-for sub in (0, 2):
-    for q in range(100, 0, -1):
-        bb = io.BytesIO(); im.save(bb, "JPEG", quality=q, subsampling=sub, optimize=True, progressive=True, **kw)
-        if bb.tell() <= 499000: done = (sub, q, bb.getvalue()); break
+# ≤499,000 字节高质量版：4:4:4、质量不低于 AKI_Q499（默认 90）；同尺寸压不进就把长边按 250 像素一档用 INTER_AREA 缩小再试
+Q499 = int(os.environ.get("AKI_Q499", "90")); done = None; L0 = max(im.size)
+def enc(r, q, sub):
+    bb = io.BytesIO(); r.save(bb, "JPEG", quality=q, subsampling=sub, optimize=True, progressive=True, **kw); return bb.getvalue()
+def shrink(L):
+    if L == L0: return im
+    return Image.fromarray(cv2.resize(np.asarray(im), (round(im.size[0] * L / L0), round(im.size[1] * L / L0)), interpolation=cv2.INTER_AREA))
+for L in [L0] + list(range((L0 - 1) // 250 * 250, 249, -250)):
+    r = shrink(L)
+    for q in range(100, Q499 - 1, -1):
+        b = enc(r, q, 0)
+        if len(b) <= 499000: done = (0, q, b, r.size); break
     if done: break
+if not done:  # 极端情况兜底：最小档继续降质量
+    for q in range(Q499 - 1, 0, -1):
+        b = enc(r, q, 0)
+        if len(b) <= 499000: done = (0, q, b, r.size); break
 open(out + "_499kb.jpg", "wb").write(done[2])
 ref = np.asarray(O.crop((x, y, x + w, y + h))).astype(float)
 d = np.asarray(im.resize((w, h), Image.BOX)).astype(float)
@@ -91,4 +102,4 @@ print(json.dumps({"model": mdl, "scale": round(scale, 4), "box": [x, y, w, h], "
     "rgb_bias": np.round((d - ref).mean((0, 1)), 2).tolist(), "mae": round(float(np.abs(d - ref).mean()), 2),
     "sat_delta": round(sat(d) - sat(ref), 2),
     "dark_pp_vs_bicubic": round(float(((Yf(Rc) < 64).mean() - (Yf(Bc) < 64).mean()) * 100), 2),
-    "jpg499": {"subsampling": "4:4:4" if done[0] == 0 else "4:2:0", "quality": done[1], "bytes": len(done[2])}}, ensure_ascii=False))
+    "jpg499": {"size": list(done[3]), "subsampling": "4:4:4", "quality": done[1], "bytes": len(done[2])}}, ensure_ascii=False))
